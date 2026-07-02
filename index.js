@@ -448,6 +448,507 @@ function fetchOpenMeteo() {
 
 async function fetchVisualCrossing() {
   const unitGroup = CONFIG.temperatureUnit === "fahrenheit" ? "us" : "metric";
+  const include = "current,days,alerts";
+  const url =
+    "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/" +
+    `${CONFIG.latitude},${CONFIG.longitude}/today/tomorrow` +
+    `?unitGroup=${unitGroup}&key=${CONFIG.visualCrossingKey}` +
+    `&include=${include}&iconSet=icons2`;
+
+  const vc = await fetchWithRetry(url, "VisualCrossing");
+
+  // VisualCrossing returns wind in km/h (metric) or mph (us), matching our unit config.
+  // However, if the user wants mph but uses metric temps (or vice versa), we handle
+  // the wind conversion here since VC ties wind unit to the unitGroup.
+  // Note: VC daily "windspeed" is the mean, not the max. We use "windgust" (peak gust)
+  // for the daily max to better match Open-Meteo's wind_speed_10m_max.
+  const needWindConversion =
+    (CONFIG.windSpeedUnit === "mph" && unitGroup === "metric") ||
+    (CONFIG.windSpeedUnit === "kmh" && unitGroup === "us");
+  const convertWind = (speed) => {
+    if (!needWindConversion) return speed;
+    // metric→mph: divide by 1.609; us→kmh: multiply by 1.609
+    return unitGroup === "metric" ? speed / 1.609 : speed * 1.609;
+  };
+
+  // VisualCrossing pressure: mb (== hPa) in metric, inHg in US. Normalize to hPa.
+  const vcPressure = vc.currentConditions.pressure;
+  const pressureHPa = vcPressure == null
+    ? null
+    : (unitGroup === "us" ? vcPressure * 33.8639 : vcPressure);
+
+  // Normalize to Open-Meteo shape so formatScene/formatForecast work unchanged.
+  const normalized = {
+    current: {
+      temperature_2m: vc.currentConditions.temp,
+      apparent_temperature: vc.currentConditions.feelslike,
+      relative_humidity_2m: vc.currentConditions.humidity,
+      weather_code: refineVCWeatherCode(vc.currentConditions.icon, vc.currentConditions.conditions),
+      wind_speed_10m: convertWind(vc.currentConditions.windspeed),
+      wind_direction_10m: vc.currentConditions.winddir,
+      surface_pressure: pressureHPa,
+    },
+  };
+
+  if (vc.days && vc.days[0]) {
+    const day = vc.days[0];
+    normalized.daily = {
+      temperature_2m_max: [day.tempmax],
+      temperature_2m_min: [day.tempmin],
+      weather_code: [refineVCWeatherCode(day.icon, day.conditions)],
+      wind_speed_10m_max: [convertWind(day.windgust ?? day.windspeed)],
+    };
+  }
+
+  if (vc.days && vc.days[1]) {
+    const tomorrow = vc.days[1];
+    normalized.tomorrow = {
+      temperature_2m_max: tomorrow.tempmax,
+      temperature_2m_min: tomorrow.tempmin,
+      weather_code: refineVCWeatherCode(tomorrow.icon, tomorrow.conditions),
+    };
+  }
+
+  if (Array.isArray(vc.alerts)) {
+    normalized.alerts = vc.alerts
+      .map((alert) => alert.event || alert.headline || alert.description)
+      .filter(Boolean);
+  }
+
+  return normalized;
+}
+
+async function fetchWeather() {
+  if (CONFIG.weatherProvider === "visualcrossing") return fetchVisualCrossing();
+  return fetchOpenMeteo();
+}
+
+function buildLocationParts() {
+  return [CONFIG.locationName, CONFIG.locationRegion].filter(Boolean);
+}
+
+// --- State persistence ---
+// Saves transition state to disk so restarts don't lose context.
+
+const STATE_DIR = fs.existsSync("/app/data") ? "/app/data" : __dirname;
+const STATE_FILE = path.join(STATE_DIR, ".weather-state.json");
+
+function loadState() {
+  try {
+    const raw = fs.readFileSync(STATE_
+function optionalEnv(name, fallback) {
+  return process.env[name] ?? fallback;
+}
+
+const CONFIG = {
+  kindroidKey: requiredEnv("KINDROID_API_KEY"),
+  aiId: requiredEnv("KINDROID_AI_ID"),
+  locationName: optionalEnv("LOCATION_NAME", ""),
+  latitude: requiredEnv("LATITUDE"),
+  longitude: requiredEnv("LONGITUDE"),
+  weatherProvider: optionalEnv("WEATHER_PROVIDER", "openmeteo").toLowerCase(),
+  visualCrossingKey: optionalEnv("VISUALCROSSING_API_KEY", ""),
+  temperatureUnit: optionalEnv("TEMPERATURE_UNIT", "celsius"),
+  windSpeedUnit: optionalEnv("WIND_SPEED_UNIT", "kmh"),
+  locationRegion: optionalEnv("LOCATION_REGION", ""),
+  updateHours: optionalEnv("UPDATE_HOURS", "0,6,12,18")
+    .split(",")
+    .map((h) => {
+      const n = Number(h.trim());
+      if (isNaN(n) || n < 0 || n > 23) {
+        console.error(`Invalid hour in UPDATE_HOURS: "${h.trim()}"`);
+        process.exit(1);
+      }
+      return n;
+    })
+    .sort((a, b) => a - b),
+  surfacePressure: (optionalEnv("SURFACE_PRESSURE", "false").toLowerCase() === "true"),
+  forecastHour: process.env.FORECAST_HOUR != null
+    ? (() => {
+        const n = Number(process.env.FORECAST_HOUR);
+        if (isNaN(n) || n < 0 || n > 23) {
+          console.error(`Invalid FORECAST_HOUR: "${process.env.FORECAST_HOUR}"`);
+          process.exit(1);
+        }
+        return n;
+      })()
+    : null,
+};
+
+// Ensure FORECAST_HOUR is included in the update schedule
+if (CONFIG.forecastHour != null && !CONFIG.updateHours.includes(CONFIG.forecastHour)) {
+  CONFIG.updateHours.push(CONFIG.forecastHour);
+  CONFIG.updateHours.sort((a, b) => a - b);
+}
+
+// Validate weather provider
+const VALID_PROVIDERS = ["openmeteo", "visualcrossing"];
+if (!VALID_PROVIDERS.includes(CONFIG.weatherProvider)) {
+  console.error(`Invalid WEATHER_PROVIDER: "${CONFIG.weatherProvider}" (must be one of: ${VALID_PROVIDERS.join(", ")})`);
+  process.exit(1);
+}
+if (CONFIG.weatherProvider === "visualcrossing" && !CONFIG.visualCrossingKey) {
+  console.error("VISUALCROSSING_API_KEY is required when WEATHER_PROVIDER=visualcrossing");
+  process.exit(1);
+}
+
+const OPEN_METEO_URL =
+  "https://api.open-meteo.com/v1/forecast" +
+  `?latitude=${CONFIG.latitude}&longitude=${CONFIG.longitude}` +
+  "&current=temperature_2m,weather_code,wind_speed_10m" +
+  (CONFIG.surfacePressure ? ",surface_pressure" : "") +
+  (CONFIG.forecastHour != null
+    ? "&daily=temperature_2m_max,temperature_2m_min,weather_code,wind_speed_10m_max&forecast_days=1"
+    : "") +
+  `&temperature_unit=${CONFIG.temperatureUnit}&wind_speed_unit=${CONFIG.windSpeedUnit}`;
+
+const TEMP_SYMBOL = CONFIG.temperatureUnit === "fahrenheit" ? "°F" : "°C";
+
+// --- VisualCrossing icon → WMO code mapping ---
+// Maps VisualCrossing icon strings to WMO weather codes so all existing
+// condition/transition logic works unchanged regardless of provider.
+
+const VC_ICON_TO_WMO = new Map([
+  ["clear-day", 0],
+  ["clear-night", 0],
+  ["partly-cloudy-day", 2],
+  ["partly-cloudy-night", 2],
+  ["cloudy", 3],
+  ["fog", 45],
+  ["wind", 1],
+  ["rain", 63],
+  ["showers-day", 80],
+  ["showers-night", 80],
+  ["snow", 73],
+  ["snow-showers-day", 85],
+  ["snow-showers-night", 85],
+  ["sleet", 66],
+  ["thunder-rain", 95],
+  ["thunder-showers-day", 95],
+  ["thunder-showers-night", 95],
+  ["hail", 99],
+]);
+
+// Refine VC icon-based WMO code using the richer `conditions` text field.
+// VC's conditions string distinguishes Drizzle / Rain / Rain Showers, which
+// the icon field collapses into just "rain" and "showers-day/night".
+function refineVCWeatherCode(icon, conditions) {
+  const base = VC_ICON_TO_WMO.get(icon) ?? 0;
+  if (!conditions) return base;
+
+  const c = conditions.toLowerCase();
+
+  // Freezing drizzle (check before generic drizzle to avoid false match)
+  if (c.includes("freezing drizzle")) return 56;
+
+  // Drizzle family → WMO 53 ("drizzling")
+  if (c.includes("drizzle")) return 53;
+
+  // Rain Showers → WMO 80 ("showery")
+  if (c.includes("rain showers")) return 80;
+
+  // Rain intensity variants (exclude freezing rain — handled by icon path)
+  if (c.includes("heavy rain") && !c.includes("freezing")) return 65;
+  if (c.includes("light rain") && !c.includes("freezing")) return 61;
+  if (c.includes("rain") && !c.includes("freezing") && !c.includes("showers")) return 63;
+
+  return base;
+}
+
+// --- WMO Weather Code mapping ---
+
+const WMO_CONDITIONS = new Map([
+  [0, "clear"],
+  [1, "mostly clear"],
+  [2, "partly cloudy"],
+  [3, "overcast"],
+  [45, "foggy"],
+  [48, "foggy"],
+  [51, "drizzling"],
+  [53, "drizzling"],
+  [55, "drizzling"],
+  [56, "freezing drizzle"],
+  [57, "freezing drizzle"],
+  [61, "rainy"],
+  [63, "rainy"],
+  [65, "rainy"],
+  [66, "freezing rain"],
+  [67, "freezing rain"],
+  [71, "snowing"],
+  [73, "snowing"],
+  [75, "snowing"],
+  [77, "snowing lightly"],
+  [80, "showery"],
+  [81, "showery"],
+  [82, "showery"],
+  [85, "snowing heavily"],
+  [86, "snowing heavily"],
+  [95, "thunderstorming"],
+  [96, "thunderstorming with hail"],
+  [99, "thunderstorming with hail"],
+]);
+
+// --- Wind ---
+
+function describeWind(speed) {
+  const isKmh = CONFIG.windSpeedUnit === "kmh";
+  const light = isKmh ? 15 : 9;
+  const moderate = isKmh ? 30 : 19;
+  const strong = isKmh ? 50 : 31;
+
+  if (speed < light) return null;
+  if (speed < moderate) return "with a light breeze";
+  if (speed < strong) return "with strong winds";
+  return "with heavy gusts";
+}
+
+const WIND_FORMS = new Map([
+  ["with a light breeze", { label: "light breeze", bare: "a light breeze" }],
+  ["with strong winds",   { label: "strong winds",  bare: "strong winds" }],
+  ["with heavy gusts",    { label: "heavy gusts",   bare: "heavy gusts" }],
+]);
+
+function windLabel(windPart) {
+  return WIND_FORMS.get(windPart)?.label ?? "null";
+}
+
+function bareWindLabel(windPart) {
+  return WIND_FORMS.get(windPart)?.bare ?? null;
+}
+
+// --- Transition System: Layer 2 — Lateral moves ---
+
+const LATERAL_TRANSITIONS = new Map([
+  // Rain <-> Snow
+  ["rainy->snowing", "The rain has turned to snow."],
+  ["rainy->snowing heavily", "The rain has turned to heavy snow."],
+  ["rainy->snowing lightly", "The rain has turned to light snow."],
+  ["snowing->rainy", "The snow has turned to rain."],
+  ["snowing heavily->rainy", "The snow has turned to rain."],
+  ["snowing lightly->rainy", "The snow has turned to rain."],
+
+  // Drizzle <-> Freezing drizzle
+  ["drizzling->freezing drizzle", "The drizzle has turned to freezing drizzle."],
+  ["freezing drizzle->drizzling", "The freezing drizzle has warmed up to regular drizzle."],
+
+  // Rain <-> Freezing rain
+  ["rainy->freezing rain", "The rain has turned to freezing rain."],
+  ["freezing rain->rainy", "The freezing rain has warmed up to regular rain."],
+
+  // Overcast <-> Fog
+  ["overcast->foggy", "Fog is settling in."],
+  ["foggy->overcast", "The fog is lifting."],
+
+  // Rain <-> Showers
+  ["rainy->showery", "The steady rain has broken up into showers."],
+  ["showery->rainy", "The showers have settled into steady rain."],
+
+  // Drizzle <-> Showers
+  ["drizzling->showery", "The drizzle has picked up into showers."],
+  ["showery->drizzling", "The showers have eased to a drizzle."],
+
+  // Drizzle <-> Rain
+  ["drizzling->rainy", "The drizzle has picked up into rain."],
+  ["rainy->drizzling", "The rain has eased to a drizzle."],
+
+  // Thunderstorm <-> Thunderstorm with hail
+  ["thunderstorming->thunderstorming with hail", "Hail is now mixed in with the storm."],
+  ["thunderstorming with hail->thunderstorming", "The hail has stopped but the storm continues."],
+
+  // Snow intensity shifts
+  ["snowing->snowing heavily", "The snow is getting heavier."],
+  ["snowing heavily->snowing", "The heavy snow is easing up."],
+  ["snowing lightly->snowing", "The snow is picking up."],
+  ["snowing->snowing lightly", "The snow is tapering off."],
+  ["snowing lightly->snowing heavily", "The snow is getting much heavier."],
+  ["snowing heavily->snowing lightly", "The heavy snow is tapering off."],
+
+  // Snow <-> Freezing precipitation
+  ["snowing->freezing rain", "The snow has turned to freezing rain."],
+  ["freezing rain->snowing", "The freezing rain has turned to snow."],
+  ["snowing->freezing drizzle", "The snow has turned to freezing drizzle."],
+  ["freezing drizzle->snowing", "The freezing drizzle has turned to snow."],
+
+  // Rain <-> Fog
+  ["rainy->foggy", "The rain has lifted; fog is settling in."],
+  ["foggy->rainy", "The fog is lifting; rain is moving in."],
+
+  // Fog <-> Drizzle
+  ["foggy->drizzling", "The fog is turning to drizzle."],
+  ["drizzling->foggy", "The drizzle has lifted; fog is settling in."],
+
+  // Freezing drizzle <-> Freezing rain
+  ["freezing drizzle->freezing rain", "The freezing drizzle is picking up to freezing rain."],
+  ["freezing rain->freezing drizzle", "The freezing rain has eased to freezing drizzle."],
+
+  // Showers <-> Snow
+  ["showery->snowing", "The showers have turned to snow."],
+  ["showery->snowing lightly", "The showers have turned to light snow."],
+  ["showery->snowing heavily", "The showers have turned to heavy snow."],
+  ["snowing->showery", "The snow has turned to showers."],
+  ["snowing lightly->showery", "The snow has turned to showers."],
+  ["snowing heavily->showery", "The snow has turned to showers."],
+
+  // Showers <-> Freezing rain
+  ["showery->freezing rain", "The showers have turned to freezing rain."],
+  ["freezing rain->showery", "The freezing rain has turned to showers."],
+]);
+
+// --- Transition System: Layer 3 — Severity-ranked escalation/de-escalation ---
+
+const SEVERITY_RANK = new Map([
+  ["clear", 0],
+  ["mostly clear", 1],
+  ["partly cloudy", 2],
+  ["overcast", 3],
+  ["foggy", 4],
+  ["drizzling", 5],
+  ["freezing drizzle", 6],
+  ["rainy", 7],
+  ["freezing rain", 8],
+  ["showery", 9],
+  ["snowing lightly", 10],
+  ["snowing", 11],
+  ["snowing heavily", 12],
+  ["thunderstorming", 13],
+  ["thunderstorming with hail", 14],
+]);
+
+const SEVERITY_THRESHOLD = 3;
+
+const ARRIVAL_PHRASES = new Map([
+  ["clear", "The skies have cleared."],
+  ["mostly clear", "The skies have mostly cleared."],
+  ["partly cloudy", "The clouds are starting to break up."],
+  ["overcast", "The skies have clouded over."],
+  ["foggy", "Fog is rolling in."],
+  ["drizzling", "It's started to drizzle."],
+  ["freezing drizzle", "Freezing drizzle has moved in."],
+  ["rainy", "Rain has moved in."],
+  ["freezing rain", "Freezing rain has moved in."],
+  ["showery", "Showers have moved in."],
+  ["snowing lightly", "Light snow has started falling."],
+  ["snowing", "It's started to snow."],
+  ["snowing heavily", "Heavy snow has moved in."],
+  ["thunderstorming", "A thunderstorm has rolled in."],
+  ["thunderstorming with hail", "A thunderstorm with hail has rolled in."],
+]);
+
+const DEPARTURE_PHRASES = new Map([
+  ["clear", "The skies have cleared."],
+  ["mostly clear", "The skies are clearing."],
+  ["partly cloudy", "Things are starting to clear up."],
+  ["overcast", "The skies have cleared up."],
+  ["foggy", "The fog is lifting."],
+  ["drizzling", "The drizzle has let up."],
+  ["freezing drizzle", "The freezing drizzle has let up."],
+  ["rainy", "The rain has stopped."],
+  ["freezing rain", "The freezing rain has stopped."],
+  ["showery", "The showers have passed."],
+  ["snowing lightly", "The snow has tapered off."],
+  ["snowing", "The snow has stopped."],
+  ["snowing heavily", "The heavy snow has stopped."],
+  ["thunderstorming", "The storm has passed."],
+  ["thunderstorming with hail", "The storm has passed."],
+]);
+
+// --- Wind Transition System ---
+
+const WIND_ESCALATION = new Map([
+  ["null->light breeze", "A breeze has picked up."],
+  ["null->strong winds", "Strong winds have picked up."],
+  ["null->heavy gusts", "Heavy gusts have rolled in."],
+  ["light breeze->strong winds", "The winds are getting stronger."],
+  ["light breeze->heavy gusts", "Heavy gusts have rolled in."],
+  ["strong winds->heavy gusts", "The winds are picking up to heavy gusts."],
+]);
+
+const WIND_DEESCALATION = new Map([
+  ["light breeze->null", "The breeze has settled."],
+  ["strong winds->null", "The strong winds have died down."],
+  ["strong winds->light breeze", "The strong winds have eased up."],
+  ["heavy gusts->null", "The heavy gusts have died down."],
+  ["heavy gusts->light breeze", "The heavy gusts have eased up."],
+  ["heavy gusts->strong winds", "The heavy gusts have let up."],
+]);
+
+// --- Merged Transition Phrases (same-direction condition + wind) ---
+
+const MERGED_ESCALATION = new Map([
+  ["overcast", "Overcast skies and {wind} have moved in."],
+  ["foggy", "Fog and {wind} have rolled in."],
+  ["drizzling", "Drizzle and {wind} have set in."],
+  ["freezing drizzle", "Freezing drizzle and {wind} have moved in."],
+  ["rainy", "Rain and {wind} have moved in."],
+  ["freezing rain", "Freezing rain and {wind} have moved in."],
+  ["showery", "Showers and {wind} have moved in."],
+  ["snowing lightly", "Light snow and {wind} have moved in."],
+  ["snowing", "Snow and {wind} have moved in."],
+  ["snowing heavily", "Heavy snow and {wind} have moved in."],
+  ["thunderstorming", "A thunderstorm and {wind} have rolled in."],
+  ["thunderstorming with hail", "A thunderstorm with hail and {wind} have rolled in."],
+]);
+
+const MERGED_DEESCALATION = new Map([
+  ["drizzling", "The drizzle and {wind} have let up."],
+  ["freezing drizzle", "The freezing drizzle and {wind} have let up."],
+  ["rainy", "The rain and {wind} have let up."],
+  ["freezing rain", "The freezing rain and {wind} have let up."],
+  ["showery", "The showers and {wind} have let up."],
+  ["snowing lightly", "The light snow and {wind} have let up."],
+  ["snowing", "The snow and {wind} have let up."],
+  ["snowing heavily", "The heavy snow and {wind} have let up."],
+  ["thunderstorming", "The storm and {wind} have passed."],
+  ["thunderstorming with hail", "The storm and {wind} have passed."],
+  ["foggy", "The fog and {wind} have let up."],
+  ["overcast", "The overcast skies and {wind} have let up."],
+]);
+
+// --- Transition helpers ---
+
+function stripPeriod(s) {
+  return s.endsWith(".") ? s.slice(0, -1) : s;
+}
+
+function lowercaseFirst(s) {
+  return s.charAt(0).toLowerCase() + s.slice(1);
+}
+
+// --- Weather ---
+
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 10000;
+
+async function fetchWithRetry(url, label) {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      if (res.ok) return res.json();
+
+      const body = await res.text();
+      if (attempt < MAX_RETRIES && res.status >= 500) {
+        console.log(`${label} ${res.status}, retrying in ${RETRY_DELAY_MS / 1000}s (attempt ${attempt}/${MAX_RETRIES})...`);
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        continue;
+      }
+      throw new Error(`${label} ${res.status}: ${body}`);
+    } catch (err) {
+      if (attempt < MAX_RETRIES) {
+        console.log(`Fetch error: ${err.message}, retrying in ${RETRY_DELAY_MS / 1000}s (attempt ${attempt}/${MAX_RETRIES})...`);
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+function fetchOpenMeteo() {
+  return fetchWithRetry(OPEN_METEO_URL, "Open-Meteo");
+}
+
+async function fetchVisualCrossing() {
+  const unitGroup = CONFIG.temperatureUnit === "fahrenheit" ? "us" : "metric";
   const include = CONFIG.forecastHour != null ? "current,days" : "current";
   const url =
     "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/" +
