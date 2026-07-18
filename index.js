@@ -709,7 +709,7 @@ function formatCompactScene(data) {
 
   const location = CONFIG.locationName || "Weather";
   const feelsPart = feels == null ? "" : ` (feels ${feels}°)`;
-  const parts = [`${location}: ${temp}${TEMP_SYMBOL}${feelsPart}, ${condition}.`];
+  const parts = [`Outside in ${location}: ${temp}${TEMP_SYMBOL}${feelsPart}, ${condition}.`];
 
   const alert = majorAlert(data.alerts);
   let outputParts = appendWithinLimit(parts, alert ? `${alert}.` : null);
@@ -720,6 +720,7 @@ function formatCompactScene(data) {
     const tomorrowCondition = compactCondition(WMO_CONDITIONS.get(data.tomorrow.weather_code) || "unknown");
     outputParts = appendWithinLimit(outputParts, `Tomorrow: ${high}/${low}, ${tomorrowCondition}.`);
   }
+  outputParts = appendWithinLimit(outputParts, "Indoors: ~70°F.");
 
   const windSpeed = current.wind_speed_10m == null ? null : Math.round(current.wind_speed_10m);
   const windDir = compassDirection(current.wind_direction_10m);
