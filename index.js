@@ -720,8 +720,6 @@ function formatCompactScene(data) {
     const tomorrowCondition = compactCondition(WMO_CONDITIONS.get(data.tomorrow.weather_code) || "unknown");
     outputParts = appendWithinLimit(outputParts, `Tomorrow: ${high}/${low}, ${tomorrowCondition}.`);
   }
-  outputParts = appendWithinLimit(outputParts, "Indoors: ~70°F.");
-
   const windSpeed = current.wind_speed_10m == null ? null : Math.round(current.wind_speed_10m);
   const windDir = compassDirection(current.wind_direction_10m);
   const windUnit = CONFIG.windSpeedUnit === "mph" ? "mph" : "km/h";
@@ -733,7 +731,7 @@ function formatCompactScene(data) {
   if (humidity != null) {
     outputParts = appendWithinLimit(outputParts, `Humidity ${humidity}%.`);
   }
-
+outputParts = appendWithinLimit(outputParts, "Indoors: ~70°F.");
   return appendPressure(outputParts.join(" "), pressurePhrase(current.surface_pressure));
 }
 
